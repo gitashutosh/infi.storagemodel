@@ -1,0 +1,132 @@
+'''
+  Copyright FMR, LLC 2015-2016
+  Author: Ashutosh Agnihotri
+  Description: Inquiry tool based on infi.storagemodel 
+'''
+
+from infi.storagemodel import get_storage_model
+import sys,re, argparse
+VERSION='0.2.38'
+
+def convertSerial(str_prod,str_serial,vendor_specific_2='',emc=False):
+    str_serial=str_serial.upper()
+    str_sn=str_serial
+    if re.findall('XIV',str_prod.upper()):
+        loc_code  = str_serial[:2]
+        array_hex = str_serial[3:-4]
+        lun       = str_serial[-4:]
+        lun_hex   = str(int(array_hex,16)).zfill(5)
+        str_sn    = loc_code+lun_hex+"_"+lun
+        if emc:
+            first_two = array_hex[:2]
+            last_two = array_hex[-2:]
+            str_sn = first_two+"00"+last_two+lun
+    elif (re.findall('SYMMETRIX',str_prod.upper())):
+        array = str_serial[:-6]
+        lun   = "0"+str(vendor_specific_2[-17:-13])
+        str_sn= array+"_"+lun.upper()
+        if emc:
+            array_last_two = array[-2:]
+            str_sn= array_last_two+"0"+lun+"000"
+    elif (re.findall('INFINIBOX',str_prod.upper())):
+        hex_array_serial=str_serial[10:15]
+        int_array_serial=int(hex_array_serial, 16)
+        string_array_serial = str(int_array_serial).zfill(5)
+        str_sn=string_array_serial+"_"+str_serial[-5:]
+    elif (re.findall('FLASHSYSTEM',str_prod.upper())):
+        str_sn=str_serial[:-4]+"_"+str_serial[-4:]
+    if emc:
+        str_sn=str_sn.lower()
+    else:
+        str_sn=str_sn.upper()
+    return str_sn
+
+def run_pinq(abbreviated=False,user_friendly_names=False, emc=False):
+    if not abbreviated: print("\nPython Inquiry utility\n")
+    if not abbreviated: print("------------------------------------------------------------------------------------------------------------------------------")
+    if not abbreviated: print("DEVICE          \t:VEND     \t:PROD            \t:REV   \t:SER NUM           \t:        CAP(kb)    \t:PATHS")
+    if not abbreviated: print("------------------------------------------------------------------------------------------------------------------------------")
+
+
+    model = get_storage_model();
+    scsi = model.get_scsi()
+    mpio = model.get_native_multipath()
+    mpaths = mpio.get_all_multipath_block_devices()
+    block_devices = scsi.get_all_scsi_block_devices()
+    non_mp_disks = mpio.filter_non_multipath_scsi_block_devices(block_devices)
+
+    all_devices= non_mp_disks + mpaths
+
+    for dev2dis in all_devices:
+        product_id = dev2dis.get_scsi_product_id()
+        serial_number ='00000000000000'
+        try:
+            serial_number  = dev2dis.get_scsi_serial_number()
+        except Exception as e:
+            pass
+
+        #print dev2dis.get_display_name
+        extended= dev2dis.get_scsi_standard_inquiry().extended
+        vendor_specific_2=""
+        try:
+            vendor_specific_2=extended.vendor_specific_2
+        except Exception as e:
+            pass
+
+        #if product_id == "LOGICAL VOLUME":
+        if product_id not in ["VV","InfiniBox","2810XIV","SYMMETRIX"]:
+            continue
+        if product_id == "VV":
+            try:
+                uid=extended.vendor_specific_1
+            except Exception as e:
+                uid="fail0000000000000000000000000000000000"
+            lun=uid[:4]
+            arr_hex = uid[4:12]
+            array_dec=int(str(arr_hex),16)
+            serial_number = str(array_dec)+"_"+lun
+            if emc:
+                serial_number = lun[:2]+"00"+lun[-2:]+"0000"
+
+        # if device is sg_map but not in dmmp, AttributeError: 'LinuxSCSIBlockDevice' object has no attribute 'get_device_mapper_access_path'
+        # Following try catch is to avoid things falling apart
+        dev_mapper_acc_pat=""
+        try:
+            dev_mapper_acc_pat = dev2dis.get_device_mapper_access_path()
+        except Exception as e:
+            dev_mapper_acc_pat = dev2dis.get_display_name()
+
+        if user_friendly_names:
+            sys.stdout.write("%-16s\t" % dev2dis.get_display_name()) # user friendly names
+        else:
+            if emc:
+                sys.stdout.write("%-16s\t" % dev_mapper_acc_pat)
+            else:
+                sys.stdout.write("%-16s\t" % re.sub('/dev/','',dev_mapper_acc_pat))
+        sys.stdout.write(":%-9s\t" % dev2dis.get_scsi_vendor_id())
+        sys.stdout.write(":%-16s\t" % product_id)
+        sys.stdout.write(":%-6s\t" % dev2dis.get_scsi_revision())
+        sys.stdout.write(":%-16s\t" % convertSerial(product_id,serial_number,vendor_specific_2=vendor_specific_2,emc=emc))
+        try:
+            sys.stdout.write(":%16s\t" % str(long(dev2dis.get_size_in_bytes()) /1024) )
+        except Exception as e:
+            sys.stdout.write(":%16s\t" % "FAILED" )
+        if emc:
+            sys.stdout.write("\n")
+        else:
+            if hasattr(dev2dis, 'get_paths'):
+                sys.stdout.write(":%s\t\n" % len(dev2dis.get_paths()))
+            else:
+                sys.stdout.write(":1\t\n")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version",             help="version of pinq", action="store_true")
+    parser.add_argument("--abbreviated",         help="no header etc", action="store_true")
+    parser.add_argument("--mpath",               help="Show user friendly names in device column", action="store_true")
+    parser.add_argument("--emc",                 help="Produce output in EMC inq format", action="store_true")
+    args = parser.parse_args()
+    if args.version:
+        print VERSION
+    else:
+        run_pinq(args.abbreviated, args.mpath, args.emc)
